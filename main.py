@@ -1,40 +1,40 @@
+from collections.abc import Iterator, MutableSequence
+from dataclasses import dataclass, field
+from time import perf_counter
+from typing import Callable
+
 import numpy as np
 import pygame
 
-from collections.abc import Iterator
-
 import src.display as display
 from src.algorithms import (
+    SortStep,
     bubble_sort,
     heap_sort,
     insertion_sort,
     merge_sort,
     quick_sort,
-    selection_sort, SortStep,
+    selection_sort,
 )
 
-# Global variables
-n_elements = 10
-min_value = 1
-max_value = n_elements
+SortAlgorithm = Callable[[MutableSequence[int]], Iterator[SortStep]]
 
-numbers = []
-rng: np.random.Generator = np.random.default_rng()
-
-default_fps = 60
-current_fps = default_fps
-speed = 1.0
-# MAX skips most intermediate states by processing many operations per redraw.
-MAX_STEPS_PER_FRAME = 128
-
-toggle_clock = False
-
-sorting = False
-list_sorted = False
-colored = {}
+DEFAULT_FPS = 60
+MAX_FRAME_BUDGET_SECONDS = 0.005
+MIN_ELEMENTS = 10
+ALGORITHMS: dict[int, tuple[SortAlgorithm, str]] = {
+    pygame.K_b: (bubble_sort, "Bubble sort"),
+    pygame.K_i: (insertion_sort, "Insertion sort"),
+    pygame.K_s: (selection_sort, "Selection sort"),
+    pygame.K_q: (quick_sort, "Quick sort"),
+    pygame.K_m: (merge_sort, "Merge sort"),
+    pygame.K_h: (heap_sort, "Heap sort"),
+}
 
 
-def generate_starting_list(n: int, min_val: int, max_val: int) -> list[int]:
+def generate_starting_list(
+    n: int, min_val: int, max_val: int, rng: np.random.Generator
+) -> list[int]:
     if n > max_val - min_val + 1:
         raise ValueError("Cannot generate more unique elements than the range allows.")
     return rng.choice(
@@ -53,111 +53,142 @@ def verify(array: list[int]) -> Iterator[int]:
         previous = array[i]
 
 
-def reset():
-    global numbers, colored, sorting, list_sorted, n_elements
-    numbers = generate_starting_list(n_elements, min_value, max_value)
-    sorting = False
-    list_sorted = False
-    colored = {}
+@dataclass
+class Visualizer:
+    n_elements: int = 10
+    min_value: int = 1
+    rng: np.random.Generator = field(default_factory=np.random.default_rng)
+    numbers: list[int] = field(default_factory=list)
+    speed: float = 1.0
+    toggle_clock: bool = False
+    sorting: bool = False
+    list_sorted: bool = False
+    colored: dict[int, tuple[int, int, int]] = field(default_factory=dict)
+    sorting_algorithm: SortAlgorithm = bubble_sort
+    sorting_algorithm_name: str = "Bubble sort"
+    sorting_generator: Iterator[SortStep] | None = None
+    verify_generator: Iterator[int] | None = None
+    running: bool = True
+    clock: pygame.time.Clock = field(default_factory=pygame.time.Clock)
 
+    @property
+    def max_value(self) -> int:
+        return self.n_elements
 
-def main():
-    running = True
-    clock = pygame.time.Clock()
+    @property
+    def current_fps(self) -> float:
+        return DEFAULT_FPS * self.speed
 
-    global toggle_clock, current_fps, speed, colored, sorting, list_sorted
-    global numbers, n_elements, min_value, max_value
+    def reset(self) -> None:
+        self.numbers = generate_starting_list(
+            self.n_elements, self.min_value, self.max_value, self.rng
+        )
+        self.sorting = False
+        self.list_sorted = False
+        self.sorting_generator = None
+        self.verify_generator = None
+        self.colored.clear()
 
-    numbers = generate_starting_list(n_elements, min_value, max_value)
+    def start_sorting(self) -> None:
+        self.sorting = True
+        self.sorting_generator = self.sorting_algorithm(self.numbers)
 
-    sorting_algorithm = bubble_sort
-    sorting_algorithm_name = "Bubble sort"
-    sorting_algorithm_generator: Iterator[SortStep] | None = None
-
-    verify_generator = None
-
-    while running:
-        if not toggle_clock:
-            clock.tick(current_fps)
-
-        display.draw_interface(numbers, sorting_algorithm_name, speed, toggle_clock, colored)
-        steps_per_frame = MAX_STEPS_PER_FRAME if toggle_clock else 1
-
-        if sorting:
-            if sorting_algorithm_generator is None:
+    def advance_sorting(self, deadline: float | None) -> None:
+        while self.sorting:
+            if deadline is not None and perf_counter() >= deadline:
+                return
+            if self.sorting_generator is None:
                 raise RuntimeError("Sorting is active without an algorithm generator.")
-            for _ in range(steps_per_frame):
-                try:
-                    step = next(sorting_algorithm_generator)
-                    colored = {
-                        index: display.GREEN if position == 0 else display.RED
-                        for position, index in enumerate(step)
-                    }
-                except StopIteration:
-                    sorting = False
-                    verify_generator = verify(numbers)
-                    list_sorted = True
-                    break
+            try:
+                step = next(self.sorting_generator)
+            except StopIteration:
+                self.sorting = False
+                self.list_sorted = True
+                self.verify_generator = verify(self.numbers)
+                break
 
-        if verify_generator is not None:
-            for _ in range(steps_per_frame):
-                try:
-                    colored[next(verify_generator)] = display.GREEN
-                except StopIteration:
-                    verify_generator = None
-                    break
+            self.colored = {
+                index: display.GREEN if position == 0 else display.RED
+                for position, index in enumerate(step)
+            }
+            if deadline is None:
+                return
+
+    def advance_verification(self, deadline: float | None) -> None:
+        while self.verify_generator is not None:
+            if deadline is not None and perf_counter() >= deadline:
+                return
+            try:
+                index = next(self.verify_generator)
+            except StopIteration:
+                self.verify_generator = None
+                break
+            self.colored[index] = display.GREEN
+            if deadline is None:
+                return
+
+    def handle_keydown(self, key: int) -> None:
+        if key == pygame.K_r:
+            self.reset()
+        elif key == pygame.K_SPACE and not (self.sorting or self.list_sorted):
+            self.start_sorting()
+        elif key in ALGORITHMS and not self.sorting:
+            self.sorting_algorithm, self.sorting_algorithm_name = ALGORITHMS[key]
+        elif key == pygame.K_KP_PLUS:
+            self.speed = min(self.speed * 2, 4.0)
+        elif key == pygame.K_KP_MINUS:
+            self.speed = max(self.speed / 2, 0.25)
+        elif key == pygame.K_KP_MULTIPLY:
+            self.toggle_clock = not self.toggle_clock
+        elif key == pygame.K_UP:
+            self.n_elements *= 2
+            self.reset()
+        elif key == pygame.K_DOWN:
+            self.n_elements = max(self.n_elements // 2, MIN_ELEMENTS)
+            self.reset()
+
+    def handle_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.QUIT:
+            self.running = False
+        elif event.type == pygame.KEYDOWN:
+            self.handle_keydown(event.key)
+
+    def run_frame(self) -> None:
+        if not self.toggle_clock:
+            self.clock.tick(self.current_fps)
+
+        display.draw_interface(
+            self.numbers,
+            self.sorting_algorithm_name,
+            self.speed,
+            self.toggle_clock,
+            self.colored,
+        )
+
+        deadline = (
+            perf_counter() + MAX_FRAME_BUDGET_SECONDS
+            if self.toggle_clock
+            else None
+        )
+        if self.sorting:
+            self.advance_sorting(deadline)
+        if self.verify_generator is not None:
+            self.advance_verification(deadline)
 
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+            self.handle_event(event)
 
-            if event.type != pygame.KEYDOWN:
-                continue
+    def run(self) -> None:
+        self.reset()
+        try:
+            while self.running:
+                self.run_frame()
+        finally:
+            pygame.quit()
 
-            if event.key == pygame.K_r:
-                reset()
-                verify_generator = None
-            elif event.key == pygame.K_SPACE and not (sorting or list_sorted):
-                sorting = True
-                sorting_algorithm_generator = sorting_algorithm(numbers)
-            elif event.key == pygame.K_i and not sorting:
-                sorting_algorithm = insertion_sort
-                sorting_algorithm_name = "Insertion sort"
-            elif event.key == pygame.K_b and not sorting:
-                sorting_algorithm = bubble_sort
-                sorting_algorithm_name = "Bubble sort"
-            elif event.key == pygame.K_s and not sorting:
-                sorting_algorithm = selection_sort
-                sorting_algorithm_name = "Selection sort"
-            elif event.key == pygame.K_q and not sorting:
-                sorting_algorithm = quick_sort
-                sorting_algorithm_name = "Quick sort"
-            elif event.key == pygame.K_m and not sorting:
-                sorting_algorithm = merge_sort
-                sorting_algorithm_name = "Merge sort"
-            elif event.key == pygame.K_h and not sorting:
-                sorting_algorithm = heap_sort
-                sorting_algorithm_name = "Heap sort"
-            elif event.key == pygame.K_KP_PLUS:
-                speed = min(speed * 2, 4.0)
-                current_fps = default_fps * speed
-            elif event.key == pygame.K_KP_MINUS:
-                speed = max(speed / 2, 0.25)
-                current_fps = default_fps * speed
-            elif event.key == pygame.K_KP_MULTIPLY:
-                toggle_clock = not toggle_clock
-            elif event.key == pygame.K_UP:
-                n_elements *= 2
-                max_value = n_elements
-                reset()
-                verify_generator = None
-            elif event.key == pygame.K_DOWN:
-                n_elements = max(n_elements // 2, 10)
-                max_value = n_elements
-                reset()
-                verify_generator = None
 
-    pygame.quit()
+def main() -> None:
+    Visualizer().run()
 
 
 if __name__ == "__main__":
