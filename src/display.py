@@ -50,8 +50,11 @@ def draw_interface(array, algorithm_name, speed: float, bypass_clock: bool, colo
     controls = baseFont.render("R - Reset | SPACE - Start sorting | +/- speed up / slow down", 1, WHITE)
     screen.blit(controls, (windowSize[0] / 2 - controls.get_width() / 2, 45))
     
-    sorting = baseFont.render("B - Bubble sort | I - Insertion sort | S - Selection sort | Q - Quick sort", 1, WHITE)
+    sorting = baseFont.render("B - Bubble | I - Insertion | S - Selection", 1, WHITE)
     screen.blit(sorting, (windowSize[0] / 2 - sorting.get_width() / 2, 75))
+
+    advanced_sorting = baseFont.render("Q - Quick | M - Merge | H - Heap", 1, WHITE)
+    screen.blit(advanced_sorting, (windowSize[0] / 2 - advanced_sorting.get_width() / 2, 105))
     
     draw_list(array, colored)
     
